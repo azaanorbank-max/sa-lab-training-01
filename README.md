@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Decision Hub — Bank Runtime Sandbox
 
 A production-like reference architecture showing how to replace scattered banking decision logic with a centralized, explainable, auditable Decision Hub.
@@ -372,3 +373,7 @@ This codebase answers all of those questions structurally — not in a Word docu
 - httpx for service-to-service calls
 - Structured JSON logging + X-Correlation-Id across all services
 - Docker + docker-compose
+=======
+# sa-lab
+Reverse Engineering
+>>>>>>> d0affe1dc8dd5ea6587c9c8c6f57e4a01b8346e0
