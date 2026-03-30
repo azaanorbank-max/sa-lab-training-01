@@ -1,0 +1,285 @@
+openapi: "3.1.0"
+info:
+  title: Decision Hub API
+  version: "1.0.0"
+  description: |
+    Central decision engine. Evaluates rules against transfer context.
+    Rules are stored as data — changeable without redeployment.
+    Every decision is written to an immutable audit log.
+
+servers:
+  - url: http://localhost:8002
+    description: Local development
+
+paths:
+  /decision/evaluate:
+    post:
+      summary: Evaluate a transfer decision
+      operationId: evaluateDecision
+      tags: [decisions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvaluateRequest'
+      responses:
+        "200":
+          description: Decision result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionResponse'
+
+  /decision/rules:
+    get:
+      summary: List all rules (admin)
+      operationId: listRules
+      tags: [admin]
+      responses:
+        "200":
+          description: All rules with versions and ownership
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Rule'
+
+  /decision/rules/{rule_id}:
+    patch:
+      summary: Update a rule without redeployment
+      operationId: patchRule
+      description: |
+        **This is the "change rule without release" endpoint.**
+
+        Business example: compliance wants to lower the daily limit from
+        10,000,000 to 5,000,000. They call PATCH with new threshold.
+        No code change. No deploy. Immediate effect.
+      tags: [admin]
+      parameters:
+        - name: rule_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "LIMIT_DAILY"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RulePatch'
+            examples:
+              disable_rule:
+                summary: Disable a rule
+                value:
+                  active: false
+              change_threshold:
+                summary: Change daily limit threshold
+                value:
+                  condition_params:
+                    fields: ["daily_sum", "amount"]
+                    operator: "SUM_GT"
+                    threshold: 5000000
+      responses:
+        "200":
+          description: Updated rule
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Rule'
+        "404":
+          description: Rule not found
+
+  /decision/audit/{decision_id}:
+    get:
+      summary: Get full audit record for a decision
+      operationId: getAudit
+      description: |
+        Returns the complete audit record: full input context, every rule
+        evaluated (matched or not), the final decision, and risk score.
+
+        This answers: "What exactly was evaluated and why?"
+      tags: [audit]
+      parameters:
+        - name: decision_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Full audit record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditRecord'
+        "404":
+          description: Audit record not found
+
+  /health:
+    get:
+      summary: Health check
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+components:
+  schemas:
+    EvaluateRequest:
+      type: object
+      required: [decision_type, context, correlation_id]
+      properties:
+        decision_type:
+          type: string
+          example: "P2P_TRANSFER"
+        context:
+          $ref: '#/components/schemas/TransferContext'
+        correlation_id:
+          type: string
+
+    TransferContext:
+      type: object
+      required: [client_id, amount, currency, country, device_trust, daily_sum, receiver_id]
+      properties:
+        client_id:
+          type: string
+        amount:
+          type: number
+        currency:
+          type: string
+        country:
+          type: string
+        device_trust:
+          type: string
+          enum: [HIGH, MEDIUM, LOW]
+        daily_sum:
+          type: number
+        receiver_id:
+          type: string
+
+    DecisionResponse:
+      type: object
+      properties:
+        decision_id:
+          type: string
+          format: uuid
+        allowed:
+          type: boolean
+        decision:
+          type: string
+          enum: [APPROVE, REJECT, CHALLENGE]
+        reasons:
+          type: array
+          items:
+            $ref: '#/components/schemas/Reason'
+        risk_score:
+          type: number
+          nullable: true
+        rules_evaluated:
+          type: integer
+        rules_matched:
+          type: integer
+
+    Reason:
+      type: object
+      properties:
+        rule_id:
+          type: string
+        reason_code:
+          type: string
+        owner:
+          type: string
+
+    Rule:
+      type: object
+      properties:
+        rule_id:
+          type: string
+        version:
+          type: string
+        priority:
+          type: integer
+        active:
+          type: boolean
+        condition_type:
+          type: string
+          enum: [THRESHOLD, BLOCKLIST, COMPOSITE]
+        condition_params:
+          type: object
+        action:
+          type: string
+          enum: [REJECT, CHALLENGE, APPROVE]
+        reason_code:
+          type: string
+        owner:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+
+    RulePatch:
+      type: object
+      properties:
+        active:
+          type: boolean
+        condition_params:
+          type: object
+
+    AuditRecord:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        decision_id:
+          type: string
+          format: uuid
+        transfer_context:
+          type: object
+          description: Full input snapshot at the time of evaluation
+        rules_checked:
+          type: array
+          description: Every rule evaluated — matched or not
+          items:
+            type: object
+            properties:
+              rule_id:
+                type: string
+              matched:
+                type: boolean
+              action:
+                type: string
+              priority:
+                type: integer
+        rules_matched:
+          type: array
+          description: Only rules that fired
+          items:
+            type: object
+        final_decision:
+          type: string
+          enum: [APPROVE, REJECT, CHALLENGE]
+        risk_score:
+          type: number
+          nullable: true
+        correlation_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        service:
+          type: string
+        db:
+          type: string

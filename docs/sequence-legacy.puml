@@ -1,0 +1,60 @@
+@startuml sequence-legacy
+title AS-IS: P2P Transfer — Logic Inside Service
+
+skinparam sequenceArrowThickness 2
+skinparam roundcorner 10
+skinparam sequenceParticipant underline
+
+actor Client
+participant "API Gateway\n:8000" as GW #LightBlue
+participant "Payment Service\n:8001" as PS #LightYellow
+participant "Ledger Mock\n:8003" as LM #LightGreen
+
+note over GW, LM #Pink
+  AS-IS PROBLEMS:
+  - Decision logic is inside payment-service (if-else code)
+  - No audit trail — nobody can answer "which rule matched?"
+  - No rule versioning — changing a limit = deploy
+  - No rule ownership — who do you call when AML list is wrong?
+  - Logic will be duplicated in every service that needs it
+end note
+
+Client -> GW: POST /api/p2p/transfer-legacy\nIdempotency-Key: key-001\n{amount: 500000, country: "IR", ...}
+
+GW -> GW: Inject X-Correlation-Id\n(if missing)
+
+GW -> PS: POST /p2p/transfer-legacy\nX-Correlation-Id: corr-abc\nIdempotency-Key: key-001
+
+note over PS #LightYellow
+  INLINE DECISION LOGIC (anti-pattern):
+  if daily_sum + amount > 10_000_000:
+    reject("LIMIT_EXCEEDED")
+  elif country in ["IR","KP","CU","SY"]:
+    reject("AML_BLOCKED")           ← matches here
+  elif device_trust == "LOW" and amount > 200000:
+    reject("FRAUD_SUSPECTED")
+  else:
+    call ledger
+end note
+
+PS -> PS: if country == "IR": REJECT ← hardcoded
+
+PS --> GW: 200 {status: "REJECTED",\n  reason: "AML_BLOCKED"}\n  ← no rule_id\n  ← no owner\n  ← no version\n  ← no audit_id
+
+GW --> Client: 200 {status: "REJECTED",\n  reason: "AML_BLOCKED"}
+
+note over Client #Pink
+  Client asks: "Which rule blocked it?"
+  Answer: "AML_BLOCKED" — a string, not a reference.
+
+  Business asks: "Who owns this rule?"
+  Answer: "Check the code."
+
+  Compliance asks: "What version of AML list was active?"
+  Answer: "Git blame, good luck."
+
+  Auditor asks: "Show me the decision log for this transaction."
+  Answer: "We don't have one."
+end note
+
+@enduml

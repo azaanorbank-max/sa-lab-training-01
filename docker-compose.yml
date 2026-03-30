@@ -1,0 +1,107 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-salab}
+      POSTGRES_USER: ${POSTGRES_USER:-salab}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-salab}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-salab} -d ${POSTGRES_DB:-salab}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  decision-hub:
+    build:
+      context: .
+      dockerfile: services/decision-hub/Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://salab:salab@postgres:5432/salab}
+      SERVICE_NAME: decision-hub
+      PORT: "8002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8002/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  ledger-mock:
+    build:
+      context: .
+      dockerfile: services/ledger-mock/Dockerfile
+    ports:
+      - "8003:8003"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://salab:salab@postgres:5432/salab}
+      SERVICE_NAME: ledger-mock
+      PORT: "8003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8003/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  payment-service:
+    build:
+      context: .
+      dockerfile: services/payment-service/Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://salab:salab@postgres:5432/salab}
+      DECISION_HUB_URL: ${DECISION_HUB_URL:-http://decision-hub:8002}
+      LEDGER_URL: ${LEDGER_URL:-http://ledger-mock:8003}
+      SERVICE_NAME: payment-service
+      PORT: "8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      decision-hub:
+        condition: service_healthy
+      ledger-mock:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      PAYMENT_SERVICE_URL: ${PAYMENT_SERVICE_URL:-http://payment-service:8001}
+      SERVICE_NAME: api-gateway
+      PORT: "8000"
+    depends_on:
+      payment-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  pgdata:

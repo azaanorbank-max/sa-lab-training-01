@@ -1,0 +1,110 @@
+@startuml sequence-v2
+title TO-BE: P2P Transfer — Decision Hub Architecture
+
+skinparam sequenceArrowThickness 2
+skinparam roundcorner 10
+skinparam sequenceParticipant underline
+
+actor Client
+participant "API Gateway\n:8000" as GW #LightBlue
+participant "Payment Service\n:8001" as PS #LightYellow
+participant "Decision Hub\n:8002" as DH #LightCoral
+database "decision_rules\ndecision_audit" as DB #LightGray
+participant "Ledger Mock\n:8003" as LM #LightGreen
+
+== Happy Path: APPROVE ==
+
+Client -> GW: POST /api/p2p/transfer\nIdempotency-Key: key-001\n{amount: 50000, country: "KZ", device_trust: "HIGH", ...}
+
+GW -> GW: Generate X-Correlation-Id: corr-xyz\n(if not in request)
+
+GW -> PS: POST /p2p/transfer\nX-Correlation-Id: corr-xyz\nIdempotency-Key: key-001
+
+PS -> PS: Check idempotency table\n→ key-001 not found, continue
+
+PS -> PS: Create transfer\nstatus = NEW\ntransfer_id = uuid-111
+
+PS -> DH: POST /decision/evaluate\n{\n  decision_type: "P2P_TRANSFER",\n  context: {amount, country, device_trust, ...},\n  correlation_id: "corr-xyz"\n}
+
+DH -> DB: SELECT * FROM decision_rules\nWHERE active=true\nORDER BY priority ASC
+
+DB --> DH: [LIMIT_DAILY(p=1), AML_102(p=2), FRAUD_017(p=3)]
+
+note over DH
+  Rule Engine evaluates in priority order:
+  LIMIT_DAILY: 0 + 50000 > 10000000? NO → skip
+  AML_102: "KZ" in blocklist? NO → skip
+  FRAUD_017: trust=HIGH? NO → skip
+
+  Result: APPROVE, risk_score=null
+end note
+
+DH -> DB: INSERT INTO decision_audit\n(decision_id, transfer_context,\n rules_checked, final_decision=APPROVE)
+
+DB --> DH: OK
+
+DH --> PS: {\n  decision_id: "dec-abc",\n  allowed: true,\n  decision: "APPROVE",\n  reasons: [],\n  rules_evaluated: 3,\n  rules_matched: 0\n}
+
+PS -> PS: Update transfer\nstatus: NEW → DECIDED\ndecision_id = dec-abc
+
+PS -> LM: POST /ledger/posting\n{transfer_id: uuid-111, amount: 50000}
+
+LM -> LM: Create posting\nstatus = POSTED
+
+LM --> PS: {posting_id: "post-999", status: "POSTED"}
+
+PS -> PS: Update transfer\nstatus: DECIDED → POSTED
+
+PS -> PS: Save idempotency snapshot\nkey-001 → cached response
+
+PS --> GW: 200 {\n  transfer_id: "uuid-111",\n  status: "POSTED",\n  decision: {decision_id, allowed: true, reasons: []},\n  posting: {posting_id, status: "POSTED"}\n}
+
+GW --> Client: 200 + X-Correlation-Id: corr-xyz\n+ X-RateLimit-Remaining: 99
+
+== Scenario: REJECT (AML) ==
+
+Client -> GW: POST /api/p2p/transfer\nIdempotency-Key: key-002\n{amount: 50000, country: "IR", ...}
+
+GW -> PS: POST /p2p/transfer\nX-Correlation-Id: corr-uvw
+
+PS -> DH: POST /decision/evaluate\n{context: {country: "IR", ...}}
+
+note over DH
+  LIMIT_DAILY: NO
+  AML_102: "IR" in ["IR","KP","CU","SY"]? YES → REJECT
+  → Stop evaluation (first REJECT wins)
+end note
+
+DH -> DB: INSERT decision_audit\n(final_decision=REJECT,\n rules_matched=[AML_102])
+
+DH --> PS: {\n  allowed: false,\n  decision: "REJECT",\n  reasons: [{\n    rule_id: "AML_102",\n    reason_code: "AML_COUNTRY_BLOCKED",\n    owner: "compliance"\n  }],\n  risk_score: 0.95\n}
+
+PS -> PS: Update transfer\nstatus: NEW → REJECTED
+
+PS --> GW: 200 {\n  status: "REJECTED",\n  decision: {reasons: [{rule_id, owner, reason_code}]}\n}
+
+GW --> Client: 200 {status: "REJECTED",\n  decision: {reasons: [AML_102]}}
+
+note over Client
+  NOW you can answer every question:
+
+  "Which rule blocked it?" → AML_102
+  "Who owns it?" → compliance team
+  "What version?" → 2.1
+  "Show audit log?" → GET /decision/audit/dec-abc
+  "What else was checked?" → rules_checked in audit
+end note
+
+== Idempotency: Retry ==
+
+Client -> GW: POST /api/p2p/transfer\nIdempotency-Key: key-001\n(same key as before)
+
+GW -> PS: POST /p2p/transfer\nIdempotency-Key: key-001
+
+PS -> PS: Check idempotency table\n→ key-001 FOUND → return cached response
+
+PS --> GW: 200 {same response as first call, idempotent: true}
+
+GW --> Client: 200 (identical to first call)\nNo duplicate transfer created\nNo duplicate posting made
+
+@enduml

@@ -1,0 +1,275 @@
+openapi: "3.1.0"
+info:
+  title: Payment Service API
+  version: "1.0.0"
+  description: |
+    Owns the transfer lifecycle, idempotency, and orchestration.
+    Calls decision-hub for evaluation, ledger-mock for posting.
+
+servers:
+  - url: http://localhost:8001
+    description: Local development
+
+paths:
+  /p2p/transfer:
+    post:
+      summary: Create P2P transfer (TO-BE — via Decision Hub)
+      operationId: createTransfer
+      tags: [transfers]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Unique key per transfer attempt. Same key = same response (no duplicate execution).
+        - name: X-Correlation-Id
+          in: header
+          required: false
+          schema:
+            type: string
+        - name: X-Fail-Mode
+          in: header
+          required: false
+          schema:
+            type: string
+            enum: [TIMEOUT, ERROR, DUPLICATE_TEST]
+          description: Forwarded to ledger-mock for failure simulation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransferRequest'
+            examples:
+              normal:
+                summary: Clean transfer
+                value:
+                  client_id: "client-001"
+                  receiver_id: "receiver-042"
+                  amount: 50000
+                  currency: "KZT"
+                  country: "KZ"
+                  device_trust: "HIGH"
+                  daily_sum: 100000
+              aml_blocked:
+                summary: AML blocked country
+                value:
+                  client_id: "client-001"
+                  receiver_id: "receiver-042"
+                  amount: 50000
+                  currency: "KZT"
+                  country: "IR"
+                  device_trust: "HIGH"
+                  daily_sum: 0
+      responses:
+        "200":
+          description: Transfer processed (POSTED, REJECTED, or FAILED)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransferResponse'
+        "400":
+          description: Missing Idempotency-Key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: Decision hub or ledger unavailable
+
+  /p2p/transfer-legacy:
+    post:
+      summary: Create P2P transfer (AS-IS — inline logic)
+      operationId: createTransferLegacy
+      tags: [transfers]
+      description: |
+        **Anti-pattern demonstration.** Logic is embedded in service code.
+        No audit trail. No rule ownership. No explainability.
+        Use this endpoint to compare with /p2p/transfer.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: X-Correlation-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransferRequest'
+      responses:
+        "200":
+          description: Transfer result (no decision field, no audit)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyTransferResponse'
+
+  /p2p/transfers/{transfer_id}:
+    get:
+      summary: Get transfer by ID
+      operationId: getTransfer
+      tags: [transfers]
+      parameters:
+        - name: transfer_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Transfer details
+        "404":
+          description: Transfer not found
+
+  /health:
+    get:
+      summary: Health check
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+components:
+  schemas:
+    TransferRequest:
+      type: object
+      required: [client_id, receiver_id, amount, currency, country, device_trust, daily_sum]
+      properties:
+        client_id:
+          type: string
+        receiver_id:
+          type: string
+        amount:
+          type: number
+          minimum: 0.01
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+          example: "KZT"
+        country:
+          type: string
+          minLength: 2
+          maxLength: 2
+          example: "KZ"
+        device_trust:
+          type: string
+          enum: [HIGH, MEDIUM, LOW]
+        daily_sum:
+          type: number
+          minimum: 0
+          description: Sum of transfers already made today (used for LIMIT_DAILY rule)
+
+    TransferResponse:
+      type: object
+      properties:
+        transfer_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [POSTED, REJECTED, FAILED, DECIDED]
+        idempotent:
+          type: boolean
+          description: true if this was a replay of a previous request
+        decision:
+          $ref: '#/components/schemas/DecisionResult'
+        posting:
+          type: object
+          properties:
+            posting_id:
+              type: string
+              format: uuid
+            status:
+              type: string
+              enum: [POSTED, FAILED]
+        correlation_id:
+          type: string
+
+    DecisionResult:
+      type: object
+      properties:
+        decision_id:
+          type: string
+          format: uuid
+        allowed:
+          type: boolean
+        decision:
+          type: string
+          enum: [APPROVE, REJECT, CHALLENGE]
+        reasons:
+          type: array
+          items:
+            $ref: '#/components/schemas/DecisionReason'
+        risk_score:
+          type: number
+          nullable: true
+          minimum: 0
+          maximum: 1
+        rules_evaluated:
+          type: integer
+        rules_matched:
+          type: integer
+
+    DecisionReason:
+      type: object
+      properties:
+        rule_id:
+          type: string
+          example: "AML_102"
+        reason_code:
+          type: string
+          example: "AML_COUNTRY_BLOCKED"
+        owner:
+          type: string
+          example: "compliance"
+
+    LegacyTransferResponse:
+      type: object
+      description: Minimal response — no structured decision, no audit
+      properties:
+        transfer_id:
+          type: string
+          nullable: true
+        status:
+          type: string
+        reason:
+          type: string
+          description: Free-text reason — not structured, not traceable
+        correlation_id:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        error_code:
+          type: string
+        message:
+          type: string
+        correlation_id:
+          type: string
+        service:
+          type: string
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "ok"
+        service:
+          type: string
+        db:
+          type: string
+          enum: [ok, unavailable]

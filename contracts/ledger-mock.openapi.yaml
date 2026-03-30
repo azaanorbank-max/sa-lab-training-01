@@ -1,0 +1,104 @@
+openapi: "3.1.0"
+info:
+  title: Ledger Mock API
+  version: "1.0.0"
+  description: |
+    Simulates the core banking ledger (posting engine).
+    Accepts posting instructions, stores them, supports failure modes for demo.
+    Idempotent: same transfer_id always returns the same posting.
+
+servers:
+  - url: http://localhost:8003
+    description: Local development
+
+paths:
+  /ledger/posting:
+    post:
+      summary: Create a ledger posting
+      operationId: createPosting
+      tags: [ledger]
+      parameters:
+        - name: X-Fail-Mode
+          in: header
+          required: false
+          schema:
+            type: string
+            enum: [TIMEOUT, ERROR, DUPLICATE_TEST]
+          description: |
+            TIMEOUT: sleep 5s then return 200 (slow ledger simulation)
+            ERROR: return 500 immediately (ledger unavailable simulation)
+        - name: X-Correlation-Id
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PostingRequest'
+      responses:
+        "200":
+          description: Posting created (or existing posting returned for same transfer_id)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PostingResponse'
+        "500":
+          description: Ledger unavailable (when X-Fail-Mode=ERROR)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /health:
+    get:
+      summary: Health check
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+
+components:
+  schemas:
+    PostingRequest:
+      type: object
+      required: [transfer_id, amount, currency, correlation_id]
+      properties:
+        transfer_id:
+          type: string
+          format: uuid
+        amount:
+          type: number
+        currency:
+          type: string
+        correlation_id:
+          type: string
+
+    PostingResponse:
+      type: object
+      properties:
+        posting_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [POSTED, FAILED]
+        fail_reason:
+          type: string
+          nullable: true
+
+    ErrorResponse:
+      type: object
+      properties:
+        error_code:
+          type: string
+        message:
+          type: string
+        correlation_id:
+          type: string
+        service:
+          type: string
