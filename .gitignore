@@ -1,1 +1,7 @@
 .DS_Store
+
+# Training facilitator files — not for candidates
+.training-facilitator-notes_EN.md
+.training-facilitator-notes_RU.md
+.training-change-log_EN.md
+.training-change-log_RU.md
