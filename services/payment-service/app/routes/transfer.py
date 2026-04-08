@@ -33,12 +33,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
 from app.models import PaymentIdempotency, PaymentTransfer
-from app.services import decision_client, ledger_client
+from app.services import decision_client, ledger_client, lifecycle
 from shared.correlation import get_correlation_id
 from shared.logging import get_logger
 
 router = APIRouter()
 logger = get_logger("payment-service")
+
+# Internal pre-check threshold. Transfers exceeding this are rejected locally
+# before reaching the decision hub.
+_INTERNAL_DAILY_LIMIT = 9_000_000
 
 
 class TransferRequest(BaseModel):
@@ -90,25 +94,7 @@ async def create_transfer(
     fail_mode = request.headers.get("X-Fail-Mode")
     correlation_id = get_correlation_id()
 
-    # 2. Check idempotency store
-    existing = await db.execute(
-        select(PaymentIdempotency).where(PaymentIdempotency.idempotency_key == idempotency_key)
-    )
-    cached = existing.scalar_one_or_none()
-    if cached:
-        logger.info(
-            "idempotent replay",
-            extra={
-                "service": "payment-service",
-                "correlation_id": correlation_id,
-                "event": "idempotent_replay",
-                "idempotency_key": idempotency_key,
-                "transfer_id": str(cached.transfer_id),
-            },
-        )
-        return {**cached.response_snapshot, "idempotent": True}
-
-    # 3. Create transfer record with status=NEW
+    # 2. Create transfer record with status=NEW
     transfer_id = uuid.uuid4()
     transfer = PaymentTransfer(
         id=transfer_id,
@@ -141,6 +127,46 @@ async def create_transfer(
         },
     )
 
+    # 3. Check idempotency store
+    existing = await db.execute(
+        select(PaymentIdempotency).where(PaymentIdempotency.idempotency_key == idempotency_key)
+    )
+    cached = existing.scalar_one_or_none()
+    if cached:
+        logger.info(
+            "idempotent replay",
+            extra={
+                "service": "payment-service",
+                "correlation_id": correlation_id,
+                "event": "idempotent_replay",
+                "idempotency_key": idempotency_key,
+                "transfer_id": str(cached.transfer_id),
+            },
+        )
+        return {**cached.response_snapshot, "idempotent": True}
+
+    # Pre-check: enforce local daily limit before calling decision hub.
+    # Transfers above this threshold are rejected without an audit record.
+    if request_body.daily_sum + request_body.amount > _INTERNAL_DAILY_LIMIT:
+        transfer.status = "REJECTED"
+        transfer.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+        _log_transition(
+            str(transfer_id), "NEW", "REJECTED", correlation_id,
+            reason="daily_limit_exceeded",
+        )
+        response_body = {
+            "transfer_id": str(transfer_id),
+            "status": "REJECTED",
+            "idempotent": False,
+            "decision": None,
+            "reason": "daily_limit_exceeded",
+            "correlation_id": correlation_id,
+        }
+        await _save_idempotency(db, idempotency_key, transfer_id, response_body)
+        await db.commit()
+        return response_body
+
     # 4. Call decision-hub
     try:
         decision = await decision_client.evaluate(
@@ -155,8 +181,7 @@ async def create_transfer(
         )
     except (httpx.HTTPError, httpx.TimeoutException) as exc:
         # Decision hub unreachable → NEW → FAILED
-        transfer.status = "FAILED"
-        transfer.updated_at = datetime.now(timezone.utc)
+        transfer.mark_failed("decision_hub_unreachable")
         await db.commit()
         _log_transition(str(transfer_id), "NEW", "FAILED", correlation_id, reason="decision_hub_unreachable", error=str(exc))
 
@@ -172,8 +197,6 @@ async def create_transfer(
         await _save_idempotency(db, idempotency_key, transfer_id, response_body)
         await db.commit()
         raise HTTPException(status_code=503, detail=response_body)
-
-    transfer.decision_id = uuid.UUID(decision.decision_id)
 
     # 5. Decision = REJECT → NEW → REJECTED
     if not decision.allowed:
@@ -206,9 +229,7 @@ async def create_transfer(
         return response_body
 
     # 6. Decision = APPROVE | CHALLENGE → NEW → DECIDED
-    transfer.status = "DECIDED"
-    transfer.updated_at = datetime.now(timezone.utc)
-    await db.commit()
+    await lifecycle.apply_decided(transfer, decision.decision_id, db)
     _log_transition(
         str(transfer_id), "NEW", "DECIDED", correlation_id,
         decision_id=decision.decision_id,

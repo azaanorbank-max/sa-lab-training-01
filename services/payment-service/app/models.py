@@ -1,7 +1,7 @@
 """
 SQLAlchemy ORM models for payment-service.
 
-payment_transfers — the transfer entity. Owns the status lifecycle.
+payment_transfers — the transfer entity.
 payment_idempotency — the idempotency store. Caches responses for replay.
 
 WHY a separate idempotency table (not just a unique key on transfers):
@@ -11,15 +11,6 @@ WHY a separate idempotency table (not just a unique key on transfers):
 
   This means the client cannot distinguish a retry from a fresh call.
   That is the entire point: idempotency makes retries safe.
-
-STATUS MACHINE:
-  NEW → DECIDED → POSTED      (happy path)
-  NEW → DECIDED → FAILED      (ledger failure)
-  NEW → REJECTED              (decision hub said REJECT)
-  NEW → FAILED                (decision hub unreachable)
-
-  Each transition is logged with correlation_id.
-  No implicit transitions. No shortcuts.
 """
 
 import uuid
@@ -38,7 +29,7 @@ class PaymentTransfer(Base):
     __tablename__ = "payment_transfers"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    idempotency_key: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
     client_id: Mapped[str] = mapped_column(String, nullable=False)
     receiver_id: Mapped[str] = mapped_column(String, nullable=False)
     amount: Mapped[float] = mapped_column(Numeric(18, 2), nullable=False)
@@ -58,6 +49,10 @@ class PaymentTransfer(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+
+    def mark_failed(self, reason: str | None = None) -> None:
+        self.status = "FAILED"
+        self.updated_at = datetime.now(timezone.utc)
 
 
 class PaymentIdempotency(Base):

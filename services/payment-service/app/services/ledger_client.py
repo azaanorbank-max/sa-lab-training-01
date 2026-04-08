@@ -12,7 +12,7 @@ WHY explicit timeout:
 """
 
 import os
-import uuid
+import uuid as uuid_module
 
 import httpx
 from pydantic import BaseModel
@@ -41,7 +41,7 @@ async def post_transfer(
 
     fail_mode is forwarded as X-Fail-Mode header (TIMEOUT | ERROR | DUPLICATE_TEST).
     """
-    headers = {"X-Correlation-Id": correlation_id}
+    headers = {"X-Correlation-Id": str(uuid_module.uuid4())}
     if fail_mode:
         headers["X-Fail-Mode"] = fail_mode
 
